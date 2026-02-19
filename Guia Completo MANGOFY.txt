@@ -1,0 +1,193 @@
+Guia Completo: Mangofy PIX Gateway
+Baseado em implementação real testada e confirmada em produção em Fevereiro/2026.
+
+1. Credenciais e Configuração
+MANGOFY_API_URL=https://checkout.mangofy.com.br/api/v1
+MANGOFY_AUTHORIZATION=seu_token_aqui
+MANGOFY_STORE_CODE_HEADER=seu_store_code   # vai no Header
+MANGOFY_STORE_CODE_BODY=seu_store_code     # vai no body (mesmo valor)
+MANGOFY_POSTBACK_URL=https://seusite.com/api/mangofy-callback
+
+Atenção: Store-Code vai como header HTTP E como campo no body JSON. São a mesma chave, enviada nos dois lugares.
+
+2. Criar um Pagamento PIX
+Endpoint: POST https://checkout.mangofy.com.br/api/v1/payment
+
+Headers obrigatórios:
+
+Content-Type: application/json
+Accept: application/json
+Authorization: seu_token
+Store-Code: seu_store_code
+
+Body (payload) completo:
+
+{
+  "store_code": "seu_store_code",
+  "external_code": "pay_1771042415835_tnjf3o",
+  "payment_method": "pix",
+  "payment_amount": 990,
+  "payment_format": "regular",
+  "installments": 1,
+  "pix": {
+    "expires_in_days": 1
+  },
+  "postback_url": "https://seusite.com/api/mangofy-callback",
+  "items": [
+    {
+      "code": "ITEM-pay_1771042415835_tnjf3o",
+      "amount": 1,
+      "price": 990
+    }
+  ],
+  "customer": {
+    "email": "cliente@email.com",
+    "name": "NOME COMPLETO DO CLIENTE",
+    "document": "88017427468",
+    "phone": "11973003483",
+    "ip": "ip_do_usuario"
+  },
+  "metadata": {
+    "session_id": "qualquer_id_interno_seu",
+    "qualquer_outro_campo": "valor"
+  }
+}
+
+Notas importantes:
+
+payment_amount é em centavos (R$ 9,90 = 990)
+customer é obrigatório com todos os campos (email, name, document, phone, ip)
+O metadata é livre — coloque o que quiser para rastrear depois
+external_code é seu ID interno — use para identificar a transação
+A Mangofy NÃO retorna imagem base64 do QR code — gere você mesmo no frontend a partir do pix_qrcode_text
+3. Response da Mangofy (sucesso)
+{
+  "payment_code": "vpag43k2le",
+  "external_code": "pay_1771042415835_tnjf3o",
+  "payment_method": "pix",
+  "payment_status": "pending",
+  "payment_amount": 990,
+  "sale_amount": 990,
+  "currency": "BRL",
+  "shipping_amount": 0,
+  "installments": 1,
+  "installment_amount": 990,
+  "created_at": "2026-02-14 01:13:35",
+  "updated_at": "2026-02-14 01:13:36",
+  "expires_at": "2026-02-15 01:13:36",
+  "attemps": 1,
+  "max_attempts": 1,
+  "customer": {
+    "name": "NOME DO CLIENTE",
+    "email": "cliente@email.com",
+    "document": "88017427468",
+    "phone": "11973003483"
+  },
+  "pix": {
+    "pix_qrcode_text": "00020101021226940014br.gov.bcb.pix..."
+  },
+  "items": [...]
+}
+
+Campos importantes:
+
+payment_code — ID único da Mangofy para esta transação. Guarde isso — vai chegar no webhook
+pix.pix_qrcode_text — o código copia-e-cola do PIX. Use para gerar o QR code no frontend (lib qrcode.react ou similar)
+payment_status começa como "pending"
+4. Webhook / Postback (notificação de pagamento)
+A Mangofy envia dois POSTs para o postback_url quando o pagamento é aprovado:
+
+Primeiro POST (formato raw):
+
+{
+  "payment_code": "vpag43k2le",
+  "external_code": "pay_1771042415835_tnjf3o",
+  "payment_status": "approved",
+  "payment_amount": 990,
+  "sale_amount": 990,
+  "pix": {
+    "pix_qrcode_text": "00020101021226940..."
+  },
+  "customer": {
+    "name": "NOME",
+    "email": "email@email.com",
+    "phone": "11973003483",
+    "document": "88017427468"
+  },
+  "approved_at": "2026-02-14 01:14:19",
+  "metadata": []
+}
+
+Segundo POST (formato "sale"):
+
+{
+  "type": "sale",
+  "payment_code": "vpag43k2le",
+  "payment_status": "approved",
+  "payment_amount": "9.90",
+  "sale_amount": "9.90",
+  "commission_amount": "8.13",
+  "started_at": "2026-02-14 01:13:35",
+  "approved_at": "2026-02-14 01:14:19",
+  "customer": { ... },
+  "metadata": [],
+  "plans": [],
+  "products": []
+}
+
+Atenção crítica:
+
+A Mangofy não envia o metadata de volta nos callbacks — o campo metadata chega como array vazio []
+Por isso você não pode identificar a transação pelo session_id que enviou no metadata
+Solução: identifique pelo payment_code que veio na response da criação
+Guarde no seu banco/sessão o mapeamento payment_code → seu_session_id
+5. Verificação de Pagamento (polling no frontend)
+Como a notificação chega via webhook no servidor, o frontend precisa perguntar ao seu backend se o pagamento foi confirmado:
+
+GET /api/check-payment?id=session_abc123
+
+Response:
+
+{
+  "status": "pending" | "paid" | "error",
+  "planId": "ouro",
+  "paidAt": 1234567890
+}
+
+Estratégia recomendada:
+
+Frontend faz polling a cada 5 segundos
+Quando status === "paid" → mostra confirmação
+Timer máximo de 10 minutos (o PIX expira)
+Também exibe botão manual "Já paguei — verificar" para o usuário forçar a verificação
+6. Fluxo Completo Resumido
+1. Frontend clica "Pagar com PIX"
+        ↓
+2. Backend: POST /api/v1/payment → Mangofy
+   ← Recebe payment_code + pix.pix_qrcode_text
+        ↓
+3. Guarda payment_code → session_id no banco
+        ↓
+4. Frontend exibe QR code gerado a partir do pix_qrcode_text
+   + Código copia-cola
+   + Polling a cada 5s em /api/check-payment
+        ↓
+5. Cliente paga no app do banco
+        ↓
+6. Mangofy envia 2x POST para postback_url
+   com payment_status = "approved" e payment_code
+        ↓
+7. Backend localiza sessão pelo payment_code
+   → Atualiza status para "paid"
+        ↓
+8. Próximo polling do frontend detecta "paid"
+   → Mostra confirmação de pagamento
+
+7. Checklist de Implementação
+ Endpoint POST /payment com todos os campos do customer (obrigatório)
+ Salvar o payment_code retornado e mapear para o ID interno
+ Gerar o QR code no frontend a partir do pix.pix_qrcode_text (Mangofy não manda imagem)
+ Endpoint de webhook que recebe 2 POSTs e processa payment_status === "approved"
+ Identificar a sessão pelo payment_code, não pelo metadata (metadata volta vazio)
+ Polling no frontend a cada 5s para detectar pagamento
+ Retornar 200 OK no webhook mesmo em caso de sessão não encontrada (evita reenvios in

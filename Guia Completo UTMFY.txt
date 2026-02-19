@@ -1,0 +1,171 @@
+Guia Completo: UTMify
+Implementação real testada e confirmada em produção — resposta {"OK":true,"data":{},"result":"SUCCESS"}
+
+1. O que é UTMify
+UTMify é uma plataforma brasileira de atribuição de UTMs para marketing digital. Ela conecta os parâmetros UTM do anúncio (de onde o cliente veio) com o pedido/pagamento, permitindo saber exatamente qual campanha, adset e anúncio gerou cada venda.
+
+2. Credenciais
+UTMIFY_API_URL=https://api.utmify.com.br/api-credentials/orders
+UTMIFY_API_TOKEN=seu_token_aqui
+
+Header de autenticação:
+
+x-api-token: seu_token_aqui
+
+3. Fluxo — 2 disparos por pedido
+A UTMify funciona com dois POSTs para o mesmo endpoint durante a vida de um pedido:
+
+1. Quando gera o PIX     → status: "waiting_payment"
+2. Quando pagamento OK   → status: "paid"
+
+O mesmo orderId une os dois registros.
+
+4. POST #1 — Pedido Criado (waiting_payment)
+Disparado imediatamente ao gerar o QR Code PIX.
+
+Endpoint: POST https://api.utmify.com.br/api-credentials/orders
+
+Headers:
+
+Content-Type: application/json
+x-api-token: seu_token
+
+Body:
+
+{
+  "orderId": "vpag43k2le",
+  "platform": "NomeDaSuaPlataforma",
+  "paymentMethod": "pix",
+  "status": "waiting_payment",
+  "createdAt": "2026-02-14 01:13:35",
+  "approvedDate": null,
+  "refundedAt": null,
+  "customer": {
+    "name": "NOME DO CLIENTE",
+    "email": "cliente@email.com",
+    "phone": "11973003483",
+    "document": "88017427468",
+    "country": "BR",
+    "ip": "ip_do_usuario"
+  },
+  "products": [
+    {
+      "id": "vpag43k2le",
+      "name": "Plano Ouro",
+      "planId": "ouro",
+      "planName": "Ouro",
+      "quantity": 1,
+      "priceInCents": 1990
+    }
+  ],
+  "trackingParameters": {
+    "src": null,
+    "sck": null,
+    "utm_source": "FB",
+    "utm_campaign": "CampanhaNome|123456",
+    "utm_medium": "AdsetNome|789012",
+    "utm_content": "AnuncioNome|345678",
+    "utm_term": "feed",
+    "fbclid": "IwAR2...",
+    "fbp": "_fbp.1.1234567890.987654321"
+  },
+  "commission": {
+    "totalPriceInCents": 1990,
+    "gatewayFeeInCents": 0,
+    "userCommissionInCents": 1990
+  },
+  "isTest": false
+}
+
+5. POST #2 — Pagamento Confirmado (paid)
+Disparado dentro do webhook da Mangofy, quando o pagamento é aprovado.
+
+Mesmo endpoint, mesmo orderId, só muda:
+
+{
+  "orderId": "vpag43k2le",
+  "status": "paid",
+  "approvedDate": "2026-02-14 01:14:19",
+  "createdAt": "2026-02-14 01:13:35",
+  ...
+}
+
+Response de sucesso (confirmada em prod):
+
+{"OK": true, "data": {}, "result": "SUCCESS"}
+
+6. Campos Críticos
+Campo	Tipo	Obrigatório	Descrição
+orderId	string	✅	ID único do pedido. Use o payment_code da Mangofy
+status	string	✅	"waiting_payment" ou "paid"
+createdAt	string	✅	Formato: "YYYY-MM-DD HH:MM:SS"
+approvedDate	string|null	✅	null no waiting, data no paid
+trackingParameters	object	✅	Os UTMs capturados da URL
+priceInCents	number	✅	Valor em centavos (R$19,90 = 1990)
+isTest	boolean	✅	Sempre false em produção
+7. trackingParameters — Como capturar
+No frontend, ao carregar a página, leia os parâmetros da URL e salve em localStorage:
+
+// URL do anúncio no Facebook:
+// ?utm_source=FB&utm_campaign=Camp|123&utm_medium=Adset|456
+//   &utm_content=Anuncio|789&utm_term=feed&fbclid=IwAR2...
+
+const params = new URLSearchParams(window.location.search);
+
+const utms = {
+  utm_source:   params.get("utm_source"),   // "FB"
+  utm_campaign: params.get("utm_campaign"), // "CampanhaNome|123456"
+  utm_medium:   params.get("utm_medium"),   // "AdsetNome|789012"
+  utm_content:  params.get("utm_content"),  // "AnuncioNome|345678"
+  utm_term:     params.get("utm_term"),     // "feed"
+  fbclid:       params.get("fbclid"),       // "IwAR2..."
+};
+
+// Persiste para usar depois ao gerar o PIX
+localStorage.setItem("utms", JSON.stringify(utms));
+
+fbp vem do cookie _fbp instalado pelo Facebook Pixel:
+
+const fbp = document.cookie.match(/(?:^|;\s*)_fbp=([^;]*)/)?.[1] || null;
+
+fbc é construído a partir do fbclid:
+
+const fbc = fbclid ? `fb.1.${Date.now()}.${fbclid}` : null;
+
+8. orderId — Qual usar
+Use o payment_code retornado pela Mangofy na criação do PIX (ex: "vpag43k2le").
+
+É curto, único, e chega de volta no webhook da Mangofy
+Facilita reconciliar o waiting_payment com o paid usando o mesmo ID
+Evite usar IDs internos longos (pode causar problemas de tamanho)
+9. Datas — Formato exato
+// Formato obrigatório: "YYYY-MM-DD HH:MM:SS"
+new Date().toISOString().replace("T", " ").slice(0, 19)
+// → "2026-02-14 01:13:35"
+
+10. Fluxo Completo
+Usuário clica no anúncio
+        ↓
+URL com UTMs → captura no frontend → salva localStorage
+        ↓
+Usuário clica "Pagar com PIX"
+        ↓
+Backend gera PIX na Mangofy
+        → POST UTMify: status "waiting_payment" + trackingParameters
+        ↓
+Usuário paga
+        ↓
+Mangofy dispara webhook no backend
+        → POST UTMify: status "paid" + approvedDate
+        ↓
+UTMify registra a conversão atribuída ao anúncio correto
+
+11. Checklist
+ Capturar UTMs da URL ao carregar a página e salvar no localStorage
+ Ler _fbp do cookie e construir fbc a partir do fbclid
+ Usar payment_code da Mangofy como orderId
+ Disparar waiting_payment ao gerar o PIX (não-bloqueante, pode ser async)
+ Disparar paid dentro do webhook de pagamento (aguardar resposta para logar)
+ Garantir que createdAt no paid é a data de criação do pedido, não a data atual
+ isTest: false em produção
+ Header: x-api-token, não Authorization
